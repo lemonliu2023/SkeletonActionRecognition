@@ -48,7 +48,7 @@
 
     // MediaPipe Pose 初始化
     const pose = new Pose({
-      locateFile: (file) => `/SkeletonActionRecognition/${file}`
+      locateFile: (file) => `/SkeletonActionRecognition/pose_solution_simd_wasm_bin.wasm`
     });
     pose.setOptions({
       modelComplexity: 1,
