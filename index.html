@@ -4,27 +4,42 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>动作捕捉App</title>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5/pose.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js"></script>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/SkeletonActionRecognition/pose.js"></script>
+  <script src="/SkeletonActionRecognition/camera_utils.js"></script>
+  <script src="/SkeletonActionRecognition/tailwind.js"></script>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { width: 100vw; height: 100vh; object-fit: contain; }
+    .floating-ui {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: rgba(255, 255, 255, 0.7);
+      backdrop-filter: blur(5px);
+      border-radius: 8px;
+      padding: 8px;
+      max-width: 200px;
+    }
+    .floating-ui button {
+      font-size: 0.75rem;
+      padding: 4px 8px;
+    }
+    @media (max-width: 640px) {
+      .floating-ui { max-width: 150px; font-size: 0.75rem; }
+      .floating-ui button { font-size: 0.65rem; padding: 3px 6px; }
+    }
+  </style>
 </head>
-<body class="bg-gray-100 flex flex-col items-center justify-center h-screen">
-  <h1 class="text-3xl font-bold mb-4">实时动作捕捉</h1>
-  <div class="flex space-x-4">
-    <div>
-      <video id="video" class="hidden"></video>
-      <canvas id="canvas" class="border rounded-lg" width="640" height="480"></canvas>
+<body>
+  <video id="video" class="hidden"></video>
+  <canvas id="canvas"></canvas>
+  <div class="floating-ui text-sm">
+    <div class="mb-2">
+      <p>跳跃: <span id="jumpCount">0</span></p>
+      <p>水果: <span id="fruitScore">0</span></p>
+      <p>校准: <span id="calibrationStatus">未校准</span></p>
     </div>
-    <div class="flex flex-col space-y-4">
-      <div class="bg-white p-4 rounded shadow">
-        <h2 class="text-xl font-semibold">跳绳计数</h2>
-        <p>跳跃次数: <span id="jumpCount">0</span></p>
-      </div>
-      <div class="bg-white p-4 rounded shadow">
-        <h2 class="text-xl font-semibold">切水果</h2>
-        <p>得分: <span id="fruitScore">0</span></p>
-      </div>
-    </div>
+    <button id="calibrateButton" class="bg-blue-500 text-white rounded hover:bg-blue-600">校准</button>
   </div>
 
   <script>
@@ -33,22 +48,50 @@
     const canvasCtx = canvasElement.getContext('2d');
     const jumpCountElement = document.getElementById('jumpCount');
     const fruitScoreElement = document.getElementById('fruitScore');
+    const calibrationStatusElement = document.getElementById('calibrationStatus');
+    const calibrateButton = document.getElementById('calibrateButton');
 
     let jumpCount = 0;
     let fruitScore = 0;
-    let lastAnkleY = null;
-    let lastHandPos = null;
+    let lastAnkleY = { left: null, right: null };
+    let lastJumpTime = 0;
     let isJumping = false;
+    const JUMP_TIME_WINDOW = 300;
+    let lastHandPos = null;
 
-    // 虚拟水果对象
-    const fruits = [
-      { x: 200, y: 100, radius: 20, active: true },
-      { x: 400, y: 150, radius: 20, active: true }
-    ];
+    // Calibration variables
+    let isCalibrating = false;
+    let calibrationJumps = 0;
+    let calibrationData = [];
+    let jumpThreshold = 20;
+    const REQUIRED_CALIBRATION_JUMPS = 3;
 
-    // MediaPipe Pose 初始化
+    // Fruits array
+    let fruits = [];
+    const MAX_FRUITS = 3;
+    const FRUIT_SPAWN_INTERVAL = 2000;
+
+    // Adjust canvas size to full screen
+    function adjustCanvasSize() {
+      const aspectRatio = 4 / 3;
+      let width = window.innerWidth;
+      let height = window.innerHeight;
+      
+      if (width / height > aspectRatio) {
+        width = height * aspectRatio;
+      } else {
+        height = width / aspectRatio;
+      }
+
+      canvasElement.width = width;
+      canvasElement.height = height;
+    }
+    adjustCanvasSize();
+    window.addEventListener('resize', adjustCanvasSize);
+
+    // MediaPipe Pose initialization
     const pose = new Pose({
-      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5/${file}`
+      locateFile: (file) => `/SkeletonActionRecognition/${file}`
     });
     pose.setOptions({
       modelComplexity: 1,
@@ -58,59 +101,117 @@
     });
     pose.onResults(onResults);
 
-    // 摄像头设置
+    // Camera setup
     const camera = new Camera(videoElement, {
       onFrame: async () => {
         await pose.send({ image: videoElement });
       },
-      width: 640,
-      height: 480
+      width: canvasElement.width,
+      height: canvasElement.height
     });
     camera.start();
 
-    // 处理姿势检测结果
+    // Calibration button handler
+    calibrateButton.addEventListener('click', () => {
+      isCalibrating = true;
+      calibrationJumps = 0;
+      calibrationData = [];
+      calibrationStatusElement.textContent = '请进行3次跳跃';
+      calibrateButton.disabled = true;
+    });
+
+    // Spawn fruits
+    setInterval(() => {
+      if (fruits.length < MAX_FRUITS) {
+        const fruit = {
+          x: Math.random() * (canvasElement.width - 40) + 20,
+          y: Math.random() * (canvasElement.height - 40) + 20,
+          radius: 20,
+          active: true,
+          sliced: false,
+          sliceTime: 0,
+          splitOffset: 0
+        };
+        fruits.push(fruit);
+      }
+    }, FRUIT_SPAWN_INTERVAL);
+
+    // Process pose results
     function onResults(results) {
       canvasCtx.save();
       canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+      // Flip canvas to fix mirroring
+      canvasCtx.scale(-1, 1);
+      canvasCtx.translate(-canvasElement.width, 0);
       canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+      canvasCtx.restore();
 
       if (results.poseLandmarks) {
-        // 绘制关键点
         drawLandmarks(results.poseLandmarks);
 
-        // 跳绳逻辑：检测脚踝Y坐标变化
-        const ankle = results.poseLandmarks[28]; // 右脚踝
-        if (ankle) {
-          const ankleY = ankle.y * canvasElement.height;
-          if (lastAnkleY !== null) {
-            const deltaY = ankleY - lastAnkleY;
-            if (!isJumping && deltaY < -20) {
-              isJumping = true;
-            } else if (isJumping && deltaY > 20) {
-              isJumping = false;
-              jumpCount++;
-              jumpCountElement.textContent = jumpCount;
+        // Jump rope logic
+        const leftAnkle = results.poseLandmarks[27];
+        const rightAnkle = results.poseLandmarks[28];
+        if (leftAnkle && rightAnkle) {
+          const leftAnkleY = leftAnkle.y * canvasElement.height;
+          const rightAnkleY = rightAnkle.y * canvasElement.height;
+          const avgAnkleY = (leftAnkleY + rightAnkleY) / 2;
+          const currentTime = Date.now();
+
+          if (lastAnkleY.left !== null && lastAnkleY.right !== null) {
+            const deltaY = avgAnkleY - (lastAnkleY.left + lastAnkleY.right) / 2;
+
+            if (isCalibrating) {
+              calibrationData.push({ y: avgAnkleY, time: currentTime });
+              if (!isJumping && deltaY < -jumpThreshold) {
+                isJumping = true;
+              } else if (isJumping && deltaY > jumpThreshold) {
+                isJumping = false;
+                calibrationJumps++;
+                if (calibrationJumps >= REQUIRED_CALIBRATION_JUMPS) {
+                  const minY = Math.min(...calibrationData.map(d => d.y));
+                  const maxY = Math.max(...calibrationData.map(d => d.y));
+                  jumpThreshold = (maxY - minY) * 0.4;
+                  isCalibrating = false;
+                  calibrationStatusElement.textContent = '校准完成';
+                  calibrateButton.disabled = false;
+                } else {
+                  calibrationStatusElement.textContent = `还需${REQUIRED_CALIBRATION_JUMPS - calibrationJumps}次跳跃`;
+                }
+              }
+            } else {
+              if (!isJumping && deltaY < -jumpThreshold && currentTime - lastJumpTime > JUMP_TIME_WINDOW) {
+                isJumping = true;
+              } else if (isJumping && deltaY > jumpThreshold) {
+                isJumping = false;
+                jumpCount++;
+                lastJumpTime = currentTime;
+                jumpCountElement.textContent = jumpCount;
+              }
             }
           }
-          lastAnkleY = ankleY;
+          lastAnkleY.left = leftAnkleY;
+          lastAnkleY.right = rightAnkleY;
         }
 
-        // 切水果逻辑：检测手部快速移动
-        const hand = results.poseLandmarks[20]; // 右手腕
+        // Fruit slicing logic
+        const hand = results.poseLandmarks[20];
         if (hand) {
-          const handPos = { x: hand.x * canvasElement.width, y: hand.y * canvasElement.height };
+          const handPos = { x: (1 - hand.x) * canvasElement.width, y: hand.y * canvasElement.height };
           if (lastHandPos) {
             const speed = Math.sqrt(
               Math.pow(handPos.x - lastHandPos.x, 2) + Math.pow(handPos.y - lastHandPos.y, 2)
             );
-            if (speed > 50) { // 快速移动判断为“切”
+            if (speed > 50) {
               fruits.forEach(fruit => {
-                if (fruit.active) {
+                if (fruit.active && !fruit.sliced) {
                   const dist = Math.sqrt(
                     Math.pow(handPos.x - fruit.x, 2) + Math.pow(handPos.y - fruit.y, 2)
                   );
                   if (dist < fruit.radius + 20) {
-                    fruit.active = false;
+                    fruit.sliced = true;
+                    fruit.sliceTime = Date.now();
                     fruitScore++;
                     fruitScoreElement.textContent = fruitScore;
                   }
@@ -122,35 +223,54 @@
         }
       }
 
-      // 绘制虚拟水果
-      fruits.forEach(fruit => {
-        if (fruit.active) {
-          canvasCtx.beginPath();
-          canvasCtx.arc(fruit.x, fruit.y, fruit.radius, 0, Math.PI * 2);
-          canvasCtx.fillStyle = 'red';
-          canvasCtx.fill();
-          canvasCtx.closePath();
+      // Draw and animate fruits
+      fruits = fruits.filter(fruit => {
+        if (fruit.sliced && Date.now() - fruit.sliceTime > 500) {
+          return false;
         }
+        if (fruit.active) {
+          if (fruit.sliced) {
+            fruit.splitOffset += 2;
+            canvasCtx.beginPath();
+            canvasCtx.arc(fruit.x - fruit.splitOffset, fruit.y, fruit.radius / 2, 0, Math.PI);
+            canvasCtx.fillStyle = 'red';
+            canvasCtx.fill();
+            canvasCtx.closePath();
+
+            canvasCtx.beginPath();
+            canvasCtx.arc(fruit.x + fruit.splitOffset, fruit.y, fruit.radius / 2, Math.PI, 2 * Math.PI);
+            canvasCtx.fillStyle = 'red';
+            canvasCtx.fill();
+            canvasCtx.closePath();
+          } else {
+            canvasCtx.beginPath();
+            canvasCtx.arc(fruit.x, fruit.y, fruit.radius, 0, Math.PI * 2);
+            canvasCtx.fillStyle = 'red';
+            canvasCtx.fill();
+            canvasCtx.closePath();
+          }
+        }
+        return true;
       });
 
       canvasCtx.restore();
     }
 
-    // 绘制关键点和连线
+    // Draw landmarks
     function drawLandmarks(landmarks) {
       const connections = [
-        [11, 12], [11, 13], [13, 15], [12, 14], [14, 16], // 上半身
-        [11, 23], [12, 24], [23, 24], [23, 25], [24, 26], // 躯干
-        [25, 27], [26, 28], [27, 29], [28, 30] // 下半身
+        [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
+        [11, 23], [12, 24], [23, 24], [23, 25], [24, 26],
+        [25, 27], [26, 28], [27, 29], [28, 30]
       ];
       for (const [start, end] of connections) {
         canvasCtx.beginPath();
         canvasCtx.moveTo(
-          landmarks[start].x * canvasElement.width,
+          (1 - landmarks[start].x) * canvasElement.width,
           landmarks[start].y * canvasElement.height
         );
         canvasCtx.lineTo(
-          landmarks[end].x * canvasElement.width,
+          (1 - landmarks[end].x) * canvasElement.width,
           landmarks[end].y * canvasElement.height
         );
         canvasCtx.strokeStyle = 'blue';
@@ -160,7 +280,7 @@
       for (const landmark of landmarks) {
         canvasCtx.beginPath();
         canvasCtx.arc(
-          landmark.x * canvasElement.width,
+          (1 - landmark.x) * canvasElement.width,
           landmark.y * canvasElement.height,
           5,
           0,
